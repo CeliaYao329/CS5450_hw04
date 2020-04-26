@@ -25,13 +25,13 @@ public:
     int proxyPort, peerPort;
     int proxy_socket, peer_socket;
     char *fwd_buffers[MAX_MSG_AMT];
-    uint16_t curLeader;
 
     // Persistent state
     enum server_status status = FOLLOWER;
     uint16_t currentTerm = 0;     // latest term server has seen (initialized to 0 on first boot, increases monotonically)
     int16_t votedFor = -1;        // candidateId that received vote in current term (or -1 if none)
     entry log[MAX_MSG_AMT] = {0}; // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+    int16_t curLeader = -1;
 
     //Volatile state
     uint16_t commitIndex; // index of highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -42,7 +42,7 @@ public:
     std::vector<uint16_t> matchIndex;
 
     //Volatile state for candidate;
-    uint16_t vote;
+    int vote;
 
     Node(uint16_t _serverID, int _proxyPort);
     void apply();
@@ -79,7 +79,11 @@ void Node::apply() {
 }
 
 void Node::runElection() {
+    curLeader = -1;
     currentTerm++;
+    char *time_str = timestamp();
+    printf("%s - running election\n", time_str);
+
     vote = 1;
     votedFor = serverID;
     status = CANDIDATE;
@@ -88,12 +92,11 @@ void Node::runElection() {
     voteReqMsg->message_len = 0;
     voteReqMsg->term = currentTerm;
     voteReqMsg->from = serverID;
+
     for (int i = 0; i < NUM_SERVER; i++) {
         if (i != serverID)
             sendMsg(peer_socket, voteReqMsg, BASE_PORT + i % NUM_SERVER);
     }
-    char *time_str = timestamp();
-    printf("%s - term: %d, run election\n", time_str, currentTerm);
 }
 
 void Node::sendHeartbeats() {
@@ -115,22 +118,20 @@ void Node::follower_handler(message *msg) {
             currentTerm = msg->term;
             curLeader = msg->from;
         }
-            
-        // TODO: responde to leaders
-        // if (msg->from != cur_leader) {
-        //     cur_leader = msg->from;
-        // }
+        // TODO: handle msg
         break;
     case REQUEST_VOTE:
         // responde to candidate
         char *time_str = timestamp();
         printf("%s - get recvQuest from %d, myterm %d, questTerm %d\n", time_str, msg->from, currentTerm, msg->term);
+        curLeader = -1;
         if (msg->term > currentTerm) {
             currentTerm = msg->term;
             printf("%s - vote for %d\n", time_str, msg->from);
             message *vote_msg = (message *)calloc(1, sizeof(message));
             vote_msg->type = VOTE;
             vote_msg->from = serverID;
+            vote_msg->term = currentTerm;
             votedFor = msg->from;
             sendMsg(peer_socket, vote_msg, BASE_PORT + msg->from);
         }
@@ -139,14 +140,15 @@ void Node::follower_handler(message *msg) {
 }
 
 void Node::candidate_handler(message *msg) {
-    switch (msg->type) {
-    case APPEND_ENTRIES:
-        if (msg->term >= currentTerm) {
-            vote = 0;
-            status = FOLLOWER;
-        }
-        break;
-    case VOTE:
+    curLeader = -1; // CANDIDATE's current leader is always -1
+    if (msg->term > currentTerm) {
+        vote = 0;
+        status = FOLLOWER;
+        votedFor = -1;
+        follower_handler(msg);
+        return;
+    }
+    if (msg->type == VOTE && msg->term==currentTerm) {
         vote++;
         char *time_str = timestamp();
         printf("%s - recv vote from %d, total votes: %d\n", time_str, msg->from, vote);
@@ -158,17 +160,18 @@ void Node::candidate_handler(message *msg) {
             printf("%s - became leader\n", time_str, vote);
             fflush(output);
         }
-        break;
     }
+        
 }
 
 void Node::leader_handler(message *msg) {
     // TODO: if term higher than me, step down
-    if (msg->term < currentTerm) {
+    if (msg->term <= currentTerm) {
         return;
     }
     currentTerm = msg->term;
     status = FOLLOWER;
+    vote = 0;
     votedFor = -1;
     char *time_str = timestamp();
     if (msg->type == REQUEST_VOTE) {
@@ -176,6 +179,7 @@ void Node::leader_handler(message *msg) {
         message *vote_msg = (message *)calloc(1, sizeof(message));
         vote_msg->type = VOTE;
         vote_msg->from = serverID;
+        vote_msg->term = currentTerm;
         votedFor = msg->from;
         sendMsg(peer_socket, vote_msg, BASE_PORT + msg->from);
     } else {
@@ -186,8 +190,6 @@ void Node::leader_handler(message *msg) {
 FILE *redir(char *fileName) {
     return freopen(fileName, "w", stdout);
 }
-
-
 
 int createProxySocket(int proxyPort) {
     int opt = TRUE;
@@ -282,7 +284,6 @@ int main(int argc, char *argv[]) {
     printf("Peer socket %d bind to port %d \n", node.peer_socket, BASE_PORT + node.serverID);
 
     while (TRUE) {
-        
 
         // clear the socket set
         FD_ZERO(&readfds);
@@ -295,17 +296,17 @@ int main(int argc, char *argv[]) {
         struct timeval timeout;
 
         if (node.status != LEADER) {
-            timeout.tv_sec = 0;
+            timeout.tv_sec = 4;
             timeout.tv_usec = rand() % 150 + 150;
         }
 
         else {
-            timeout.tv_sec = 0;
-            timeout.tv_usec = rand() % 30;
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 500;
         }
 
         char *time_str = timestamp();
-        printf("%s - term %d: \t currLeader: %d\twaiting: %d.%d\n", time_str, node.currentTerm, node.curLeader, timeout.tv_sec, timeout.tv_usec);
+        printf("%s - term %d\t status:%d \t currLeader: %d\n", time_str, node.currentTerm, node.status, node.curLeader);
 
         // wait for an activity on one of the sockets
         activity = select(max_sd + 1, &readfds, NULL, NULL, &timeout);
@@ -332,7 +333,7 @@ int main(int argc, char *argv[]) {
                 } else {
                     memset(cmd_buffer, 0, MAX_CMD_LEN);
                     int valread = read(node.proxy_socket, cmd_buffer, sizeof(cmd_buffer));
-                    time_str = timestamp();
+                    char *time_str = timestamp();
                     printf("%s - cmd: %s\n", time_str, cmd_buffer);
                     //handle the command from proxy
 
@@ -354,7 +355,7 @@ int main(int argc, char *argv[]) {
                         fwd_msg->type = FORWARD;
                         fwd_msg->message_len = strlen(text_pointer);
                         fwd_msg->from = node.serverID;
-                        fwd_msg->term = -1;
+                        fwd_msg->term = node.currentTerm;
                         memcpy(fwd_msg->msg, text_pointer, strlen(text_pointer));
                         if (node.curLeader >= 0) {
                             node.sendMsg(node.peer_socket, fwd_msg, BASE_PORT + node.curLeader % NUM_SERVER);
@@ -377,8 +378,8 @@ int main(int argc, char *argv[]) {
                     continue;
                 }
                 int peerID = ntohs(peerAddr.sin_port) - BASE_PORT;
-                char *time_str = timestamp();
-                printf("%s - msg from %d, type %d, term %d!\n", time_str, msg_buffer->from, msg_buffer->type, msg_buffer->term);
+                // char *time_str = timestamp();
+                // printf("%s - msg from %d, type %d, term %d!\n", time_str, msg_buffer->from, msg_buffer->type, msg_buffer->term);
                 switch (node.status) {
                 case FOLLOWER:
                     node.follower_handler(msg_buffer);
@@ -398,7 +399,7 @@ int main(int argc, char *argv[]) {
         // handle election timeout
         if (activity == 0) {
             switch (node.status) {
-            case FOLLOWER:{
+            case FOLLOWER: {
                 char *time_str = timestamp();
                 printf("%s - Follower Timeout\n", time_str);
                 node.runElection();
