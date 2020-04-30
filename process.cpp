@@ -182,54 +182,63 @@ void Node::follower_handler(message *msg) {
             // leaderCommit
             // Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
             // what if log[prevLogIndex] doesnot exist
-            message *reply = (message *)calloc(1, sizeof(message));
-   			reply->type = APPEND_ENTRIES;
-    		reply->message_len = 0;
-    		reply->term = currentTerm;
-    		reply->from = serverID;
+            if (msg->message_len > 0) {
+	            message *reply = (message *)calloc(1, sizeof(message));
+	   			reply->type = APPEND_ENTRIES;
+	    		reply->message_len = msg->message_len;
+	    		reply->term = currentTerm;
+	    		reply->from = serverID;
 
-            if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex)) {
-            	// reply false and term
-            	printf("Follower %d Log Inconsistent, Reply False\n", serverID);
-            	fflush(output);
-            	reply->success = false;
-            	sendMsg(peer_socket, reply, BASE_PORT + curLeader);
-            	break;
-            	// Leader: nextIndex[]-- and retry 
-            } 
-            else if (commitIndex > msg->prevLogIndex) { // index entry already exist
-            	if (log[(msg->prevLogIndex)+1].term != currentTerm) { // conflict
-            		// (which means logs are same up untill prevLogindex, but is different after it)
-            		// delete entryies after it (overwrite)
-            		commitIndex = msg->prevLogIndex;    		
-            	}
-            }            
-            // Append any new entries not already in the log
-            entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
-			memcpy(entry_ptr->msg, msg->msg, msg->message_len);
-			entry_ptr->term = currentTerm;
-			entry_ptr->message_id = msg->message_id;
-            log[msg->prevLogIndex+1] = *entry_ptr;
-        
-            if (msg->leaderCommit > commitIndex) {
-            	commitIndex = std::min(msg->leaderCommit, msg->prevLogIndex);
-            }
-            // when to handle commitIndex majority? from leader, does follower need to worry? 
+		        if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex)) {
+		        	// reply false and term
+		        	printf("Follower %d Log Inconsistent, Reply False\n", serverID);
+		        	fflush(output);
+		        	reply->success = false;
+		        	sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		        	break;
+		        	// Leader: nextIndex[]-- and retry 
+		        } 
+		        else if (commitIndex > msg->prevLogIndex) { // index entry already exist
+		        	if (log[(msg->prevLogIndex)+1].term != currentTerm) { // conflict
+		        		// (which means logs are same up untill prevLogindex, but is different after it)
+		        		// delete entryies after it (overwrite)
+		        		commitIndex = msg->prevLogIndex;    		
+		        	}
+		        }            
+		        // Append any new entries not already in the log
+		        entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
+				memcpy(entry_ptr->msg, msg->msg, msg->message_len);
+				entry_ptr->term = currentTerm;
+				entry_ptr->message_id = msg->message_id;
+		        log[msg->prevLogIndex+1] = *entry_ptr;
+		        printf("Follower %d append new entry (message_id: %d) to log\n", serverID, msg->message_id);
+		        fflush(output);
+		    
+		        if (msg->leaderCommit > commitIndex) {
+		        	commitIndex = std::min(msg->leaderCommit, msg->prevLogIndex);
+		        }
+		        // when to handle commitIndex majority? from leader, does follower need to worry? 
 
-            // Reply success=True and term
-    		reply->success = true;
-            sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		        // Reply success=True and term
+				reply->success = true;
+				printf("Follower %d send success reply to leader\n", serverID);
+		        fflush(output);
+		        sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		    }
         } else {
         	// if currentTerm > msg->term, reply false
-        	printf("Follower %d Receive a Append_Entries from node %d, but currentTerm is higher, Reply False\n", serverID, msg->from);
-            fflush(output);
-        	message *reply = (message *)calloc(1, sizeof(message));
-    		reply->type = APPEND_ENTRIES;
-    		reply->message_len = 0;
-    		reply->term = currentTerm;
-    		reply->from = serverID;
-    		sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+        	if (msg->message_len > 0) {
+		    	printf("Follower %d Receive a Append_Entries from node %d, but currentTerm is higher, Reply False\n", serverID, msg->from);
+		        fflush(output);
+		    	message *reply = (message *)calloc(1, sizeof(message));
+				reply->type = APPEND_ENTRIES;
+				reply->message_len = 0;
+				reply->term = currentTerm;
+				reply->from = serverID;
+				sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		    }
         }
+
         break;
 
     case REQUEST_VOTE:
@@ -333,7 +342,7 @@ void Node::leader_handler(message *msg) {
 	    	}
 		}
 
-		if (msg->type == APPEND_ENTRIES && msg->message_len!=0) { // response from followers 
+		if (msg->type == APPEND_ENTRIES && msg->message_len > 0) { // response from followers 
 			if (msg->success) { // true
 				// If successful: update nextIndex and matchIndex for follower
 				printf("Leader Receive a Success Reply of AppendEntrie from %d\n", msg->from);
@@ -551,7 +560,11 @@ int main(int argc, char *argv[]) {
                     	strcat(send_buf, "chatLog ");
                     	int num_to_send = 8;
 
+                    	printf("ChatLog 1!\n");
+                        fflush(output);
                     	for (int i=1; i<=node.commitIndex; i++) {
+                    		printf("ChatLog 2!\n");
+                        	fflush(output);
                     		strcat(send_buf, node.log[i].msg);
                     		send_buf[strlen(send_buf)-1] = 0; // remove newline char?
                            	strcat(send_buf, ",");
@@ -559,6 +572,8 @@ int main(int argc, char *argv[]) {
                     	}
                     	strcat(send_buf, "\n");
                     	num_to_send +=1;
+                    	printf("ChatLog 3!\n");
+                        fflush(output);
 
                     	int valsend = sendto(node.proxy_socket, send_buf, num_to_send, 0, (struct sockaddr *)&proxyAddr, sizeof(proxyAddr));
 
