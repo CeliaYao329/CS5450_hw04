@@ -189,7 +189,7 @@ void Node::follower_handler(message *msg) {
 	    		reply->term = currentTerm;
 	    		reply->from = serverID;
 
-		        if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex)) {
+		        if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex-1)) {
 		        	// reply false and term
 		        	printf("Follower %d Log Inconsistent, Reply False\n", serverID);
 		        	fflush(output);
@@ -560,10 +560,8 @@ int main(int argc, char *argv[]) {
                     	strcat(send_buf, "chatLog ");
                     	int num_to_send = 8;
 
-                    	printf("ChatLog 1!\n");
                         fflush(output);
                     	for (int i=1; i<=node.commitIndex; i++) {
-                    		printf("ChatLog 2!\n");
                         	fflush(output);
                     		strcat(send_buf, node.log[i].msg);
                     		send_buf[strlen(send_buf)-1] = 0; // remove newline char?
