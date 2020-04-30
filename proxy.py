@@ -190,6 +190,7 @@ def main():
                 send(pid, sp1[1])
             elif cmd[:5] == 'crash': # crashXXX
                 send(pid, sp1[1])
+                threads[pid].close()
             elif cmd == 'get': # get chatLog
                 if not wait_chat_log: # sleep for the first continous get command
                     time.sleep(1)

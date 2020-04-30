@@ -41,6 +41,7 @@ enum message_type {
 typedef struct entry {
     char msg[MAX_MSG_LEN];
     uint16_t term;
+    uint16_t message_id;
 } entry;
 
 typedef struct message {
@@ -49,6 +50,14 @@ typedef struct message {
     uint16_t from; //sender of the message, by server_id
     uint16_t term; 
     char msg[MAX_MSG_LEN];
+
+    uint16_t message_id;    
+
+    // AppendEntries
+    uint16_t prevLogIndex;
+    uint16_t prevLogTerm;
+    uint16_t leaderCommit;
+    bool success;
 } message;
 
 int createProxySocket(int proxyPort);

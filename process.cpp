@@ -34,23 +34,27 @@ public:
     int16_t curLeader = -1;
 
     //Volatile state
-    uint16_t commitIndex; // index of highest log entry known to be committed (initialized to 0, increases monotonically)
-    uint16_t lastApplied;
+    uint16_t commitIndex = 0; // index of highest log entry known to be committed (initialized to 0, increases monotonically)
+    uint16_t lastApplied; // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
 
     //Volatile state for leader
-    std::vector<uint16_t> nextIndex;
-    std::vector<uint16_t> matchIndex;
+    std::vector<uint16_t> nextIndex; // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+    std::vector<uint16_t> matchIndex; // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
     //Volatile state for candidate;
     int vote;
 
+    int count;
+
     Node(uint16_t _serverID, int _proxyPort);
-    void apply();
     void runElection();
     void sendHeartbeats();
     void follower_handler(message *msg);
     void candidate_handler(message *msg);
     void leader_handler(message *msg);
+    void sendACKtoProxy(int message_id, int sequence_id);
+    message *appendEntries(int next_idx);
+
 
     int sendMsg(int socket, message *m, int peerPort) {
         struct sockaddr_in peerAddr;
@@ -72,11 +76,63 @@ public:
 Node::Node(uint16_t _serverID, int _proxyPort) : serverID(_serverID), proxyPort(_proxyPort) {
     printf("%d server node constructed\n", serverID);
     peerPort = BASE_PORT + serverID;
+
+    // 0 index entry - log[0]
+    entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
+	entry_ptr->term = 0;
+	log[0] = *entry_ptr;
 }
 
-void Node::apply() {
-    // TODO: If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
+void Node::sendACKtoProxy(int message_id, int sequence_id) {
+	char send_buf[20];
+	memset(send_buf, 0, sizeof(send_buf));
+	sprintf(send_buf, "ack %d %d\n", message_id, sequence_id);
+
+	int num_to_send = 0;
+	while(num_to_send < 20 && send_buf[num_to_send] != '\n'){
+		num_to_send++;
+	}
+	num_to_send++;
+
+	printf("Send ack to proxy: %s\n", send_buf);
+	fflush(stdout);
+
+	struct sockaddr_in proxyAddr;
+    memset((char *)&proxyAddr, 0, sizeof(proxyAddr));
+    proxyAddr.sin_family = AF_INET;
+    proxyAddr.sin_addr.s_addr = INADDR_ANY;
+    proxyAddr.sin_port = htons(proxyPort);
+	int valsend = sendto(proxy_socket, send_buf, num_to_send, 0, (struct sockaddr *)&proxyAddr, sizeof(proxyAddr));
+
+	if (valsend < 0) {
+	    printf("ERROR: Send ack to proxy \n");
+	    fflush(output);
+	}
 }
+
+message* Node::appendEntries(int next_idx) {
+	message *appendEntry = (message *)calloc(1, sizeof(message));				
+	appendEntry->type = APPEND_ENTRIES;
+	entry log_entry = log[next_idx];
+	appendEntry->message_len = strlen(log_entry.msg); // entry log
+	appendEntry->term = log_entry.term; 
+	appendEntry->from = serverID;
+	appendEntry->message_id = log_entry.message_id;
+
+	appendEntry->prevLogIndex = next_idx - 1;
+
+	if (appendEntry->prevLogIndex != 0) {
+		appendEntry->prevLogTerm = log[next_idx-1].term; 
+	} else {
+		appendEntry->prevLogTerm = 0; // log[0]
+	}
+
+	appendEntry->leaderCommit = commitIndex;
+	memcpy(appendEntry->msg, &log_entry.msg, strlen(log_entry.msg)); // pointer?
+
+	return appendEntry;
+}
+
 
 void Node::runElection() {
     curLeader = -1;
@@ -115,11 +171,67 @@ void Node::follower_handler(message *msg) {
     switch (msg->type) {
     case APPEND_ENTRIES:
         if (msg->term >= currentTerm) {
+        	printf("Follower %d Receive a Append_Entries from node %d\n", serverID, msg->from);
+            fflush(output);
+
             currentTerm = msg->term;
             curLeader = msg->from;
+
+            // prevLogIndex
+            // prevLogTerm
+            // leaderCommit
+            // Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+            // what if log[prevLogIndex] doesnot exist
+            message *reply = (message *)calloc(1, sizeof(message));
+   			reply->type = APPEND_ENTRIES;
+    		reply->message_len = 0;
+    		reply->term = currentTerm;
+    		reply->from = serverID;
+
+            if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex)) {
+            	// reply false and term
+            	printf("Follower %d Log Inconsistent, Reply False\n", serverID);
+            	fflush(output);
+            	reply->success = false;
+            	sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+            	break;
+            	// Leader: nextIndex[]-- and retry 
+            } 
+            else if (commitIndex > msg->prevLogIndex) { // index entry already exist
+            	if (log[(msg->prevLogIndex)+1].term != currentTerm) { // conflict
+            		// (which means logs are same up untill prevLogindex, but is different after it)
+            		// delete entryies after it (overwrite)
+            		commitIndex = msg->prevLogIndex;    		
+            	}
+            }            
+            // Append any new entries not already in the log
+            entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
+			memcpy(entry_ptr->msg, msg->msg, msg->message_len);
+			entry_ptr->term = currentTerm;
+			entry_ptr->message_id = msg->message_id;
+            log[msg->prevLogIndex+1] = *entry_ptr;
+        
+            if (msg->leaderCommit > commitIndex) {
+            	commitIndex = std::min(msg->leaderCommit, msg->prevLogIndex);
+            }
+            // when to handle commitIndex majority? from leader, does follower need to worry? 
+
+            // Reply success=True and term
+    		reply->success = true;
+            sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+        } else {
+        	// if currentTerm > msg->term, reply false
+        	printf("Follower %d Receive a Append_Entries from node %d, but currentTerm is higher, Reply False\n", serverID, msg->from);
+            fflush(output);
+        	message *reply = (message *)calloc(1, sizeof(message));
+    		reply->type = APPEND_ENTRIES;
+    		reply->message_len = 0;
+    		reply->term = currentTerm;
+    		reply->from = serverID;
+    		sendMsg(peer_socket, reply, BASE_PORT + curLeader);
         }
-        // TODO: handle msg
         break;
+
     case REQUEST_VOTE:
         // responde to candidate
         char *time_str = timestamp();
@@ -155,6 +267,10 @@ void Node::candidate_handler(message *msg) {
         if (vote > (NUM_SERVER / 2)) {
             status = LEADER;
             curLeader = serverID;
+
+            // Reinitialize nextIndex[]
+            nextIndex.assign(NUM_SERVER, commitIndex+1); 
+
             sendHeartbeats();
             time_str = timestamp();
             printf("%s - became leader\n", time_str, vote);
@@ -165,26 +281,113 @@ void Node::candidate_handler(message *msg) {
 }
 
 void Node::leader_handler(message *msg) {
-    // TODO: if term higher than me, step down
-    if (msg->term <= currentTerm) {
-        return;
-    }
-    currentTerm = msg->term;
-    status = FOLLOWER;
-    vote = 0;
-    votedFor = -1;
-    char *time_str = timestamp();
-    if (msg->type == REQUEST_VOTE) {
-        printf("%s - vote for %d\n", time_str, msg->from);
-        message *vote_msg = (message *)calloc(1, sizeof(message));
-        vote_msg->type = VOTE;
-        vote_msg->from = serverID;
-        vote_msg->term = currentTerm;
-        votedFor = msg->from;
-        sendMsg(peer_socket, vote_msg, BASE_PORT + msg->from);
-    } else {
-        curLeader = msg->from;
-    }
+
+	if (msg->term <= currentTerm) {
+        //return;
+    
+		if (msg->type == FORWARD) { // what if leader receive a new message again 
+			// log index start at 1
+			// construct new logentry
+			printf("Leader Receive a New Forward Message from node %d\n", msg->from);
+            fflush(output);
+
+			entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
+			memcpy(entry_ptr->msg, msg->msg, msg->message_len);
+			entry_ptr->term = currentTerm;
+			entry_ptr->message_id = msg->message_id;
+
+			// append entry to log[]
+			// commitIndex (previously empty at this Index, now fill an entry)
+			printf("Leader commitIndex (before new msg): %d \n", commitIndex);
+            fflush(output);
+			log[commitIndex+1] = *entry_ptr; // 		
+
+			count = 1; 
+
+			/*
+			message *appendEntry = (message *)calloc(1, sizeof(message));
+	    	appendEntry->type = APPEND_ENTRIES;
+	    	appendEntry->message_len = msg->message_len; // here
+	    	appendEntry->term = currentTerm;
+	    	appendEntry->from = serverID;
+	    	appendEntry->message_id = msg->message_id;
+
+	    	appendEntry->prevLogIndex = commitIndex;
+	    	appendEntry->prevLogTerm = log[commitIndex].term;
+	    	appendEntry->leaderCommit = commitIndex;
+	    	*/
+
+			// send AppendEntries to all followers
+	    	for (int i = 0; i < NUM_SERVER; i++) {
+	        	if (i != serverID) {
+	        		// if last log index >= nextIndex[i] (leader has more message than follower)
+	        		if (commitIndex+1 >= nextIndex[i]) {
+	        			// send appendEntry with log starting at nextIndex[i]  
+	        			// here sending the new message
+	        			printf("Leader send new AppendEntries to node %d\n", i);
+            			fflush(output);
+						message *appendEntry = appendEntries(nextIndex[i]);
+	        			sendMsg(peer_socket, appendEntry, BASE_PORT + i % NUM_SERVER);
+	        		}
+	        	}
+	    	}
+		}
+
+		if (msg->type == APPEND_ENTRIES && msg->message_len!=0) { // response from followers 
+			if (msg->success) { // true
+				// If successful: update nextIndex and matchIndex for follower
+				printf("Leader Receive a Success Reply of AppendEntrie from %d\n", msg->from);
+            	fflush(output);
+
+				nextIndex[msg->from]++;
+
+				if (commitIndex+1 >= nextIndex[msg->from]) { 
+					printf("Leader continue sending AE\n");
+            	    fflush(output);
+
+					// continue sending AE
+					message *appendEntry = appendEntries(nextIndex[msg->from]);
+	        		sendMsg(peer_socket, appendEntry, BASE_PORT + msg->from);
+				} else { 
+					// this follower log up to date (commitIndex)
+					printf("Leader update count \n");
+            		fflush(output);
+					count++;
+					if (count > NUM_SERVER/2) {
+						commitIndex++;
+						sendACKtoProxy(log[commitIndex].message_id, commitIndex);
+					}
+				}
+
+			} else { // false
+				printf("Leader Receive a False Reply of AppendEntrie from %d\n", msg->from);
+            	fflush(output);
+				// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
+				nextIndex[msg->from]--; 
+				// send log entry AE at nextIndex back
+				message *appendEntry = appendEntries(nextIndex[msg->from]);
+				sendMsg(peer_socket, appendEntry, BASE_PORT + msg->from);
+			}
+		}
+
+	} else {
+	    currentTerm = msg->term;
+	    status = FOLLOWER;
+	    vote = 0;
+	    votedFor = -1;
+	    char *time_str = timestamp();
+	    if (msg->type == REQUEST_VOTE) {
+	        printf("%s - vote for %d\n", time_str, msg->from);
+	        message *vote_msg = (message *)calloc(1, sizeof(message));
+	        vote_msg->type = VOTE;
+	        vote_msg->from = serverID;
+	        vote_msg->term = currentTerm;
+	        votedFor = msg->from;
+	        sendMsg(peer_socket, vote_msg, BASE_PORT + msg->from);
+	    } else {
+	        curLeader = msg->from;
+	    }
+	}
 }
 
 FILE *redir(char *fileName) {
@@ -340,6 +543,31 @@ int main(int argc, char *argv[]) {
                     // "<id> get chatLog"
                     if (strncmp(cmd_buffer, "get chatLog", strlen("get chatLog")) == 0) {
                         // TODO: return chatLog
+                        printf("Command: ChatLog!\n");
+                        fflush(output);
+
+                        char send_buf[MAX_MSG_LEN*MAX_MSG_AMT+10];
+                        memset(send_buf, 0, sizeof(send_buf));
+                    	strcat(send_buf, "chatLog ");
+                    	int num_to_send = 8;
+
+                    	for (int i=1; i<=node.commitIndex; i++) {
+                    		strcat(send_buf, node.log[i].msg);
+                    		send_buf[strlen(send_buf)-1] = 0; // remove newline char?
+                           	strcat(send_buf, ",");
+                           	num_to_send += strlen(node.log[i].msg);
+                    	}
+                    	strcat(send_buf, "\n");
+                    	num_to_send +=1;
+
+                    	int valsend = sendto(node.proxy_socket, send_buf, num_to_send, 0, (struct sockaddr *)&proxyAddr, sizeof(proxyAddr));
+
+	                    if (valsend < 0) {
+	                        printf("ERROR: sendto() chatlog! \n");
+	                        fflush(output);
+	                    }
+
+
                     } else if (strncmp(cmd_buffer, "crash", strlen("crash")) == 0) {
                         printf("Command: GO DIE!\n");
                         fflush(output);
@@ -351,18 +579,24 @@ int main(int argc, char *argv[]) {
                         char *text_pointer = strchr(cmd_buffer, ' ');
                         text_pointer = strchr(text_pointer + 1, ' ') + 1;
 
+                        char *id_pointer = strchr(cmd_buffer, ' ') + 1;
+
                         message *fwd_msg = (message *)calloc(1, sizeof(message));
                         fwd_msg->type = FORWARD;
                         fwd_msg->message_len = strlen(text_pointer);
                         fwd_msg->from = node.serverID;
                         fwd_msg->term = node.currentTerm;
+                        fwd_msg->message_id = atoi(id_pointer); // msg_id
                         memcpy(fwd_msg->msg, text_pointer, strlen(text_pointer));
+
+
                         if (node.curLeader >= 0) {
                             node.sendMsg(node.peer_socket, fwd_msg, BASE_PORT + node.curLeader % NUM_SERVER);
                         } else {
                             char msg_buf[MAX_MSG_LEN];
                             memcpy(msg_buf, text_pointer, strlen(text_pointer));
                             // TODO: add to buffer
+
                         }
                     }
                 }
@@ -411,7 +645,6 @@ int main(int argc, char *argv[]) {
                 node.runElection();
                 break;
             }
-
             case LEADER: {
                 node.sendHeartbeats();
                 break;
