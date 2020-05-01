@@ -35,7 +35,8 @@ enum message_type {
     REQUEST_VOTE,
     VOTE,
     ACK,
-    FORWARD
+    FORWARD,
+    COMMIT
 } message_type;
 
 typedef struct entry {

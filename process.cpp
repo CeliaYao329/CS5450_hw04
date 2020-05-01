@@ -169,6 +169,18 @@ void Node::sendHeartbeats() {
 
 void Node::follower_handler(message *msg) {
     switch (msg->type) {
+	case COMMIT:
+		if (msg->term >= currentTerm) {
+			printf("Follower %d Receive a COMMIT Message from node %d\n", serverID, msg->from);
+            fflush(output);
+			if (msg->leaderCommit == commitIndex+1) {
+				printf("Follower %d Update its commitIndex to %d\n", serverID, msg->leaderCommit);
+            	fflush(output);
+				commitIndex = msg->leaderCommit;
+			}
+		}
+		break;
+
     case APPEND_ENTRIES:
         if (msg->term >= currentTerm) {
         	printf("Follower %d Receive a Append_Entries from node %d\n", serverID, msg->from);
@@ -176,12 +188,8 @@ void Node::follower_handler(message *msg) {
 
             currentTerm = msg->term;
             curLeader = msg->from;
-
-            // prevLogIndex
-            // prevLogTerm
-            // leaderCommit
+ 
             // Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-            // what if log[prevLogIndex] doesnot exist
             if (msg->message_len > 0) {
 	            message *reply = (message *)calloc(1, sizeof(message));
 	   			reply->type = APPEND_ENTRIES;
@@ -215,9 +223,13 @@ void Node::follower_handler(message *msg) {
 		        fflush(output);
 		    
 		        if (msg->leaderCommit > commitIndex) {
-		        	commitIndex = std::min(msg->leaderCommit, msg->prevLogIndex);
+		        	// commitIndex = min(leaderCommit, prevIndex+1)
+		        	if (msg->leaderCommit <= msg->prevLogIndex+1){
+		        		commitIndex = msg->leaderCommit;
+		        	} else {
+		        		commitIndex = msg->prevLogIndex+1;
+		        	}
 		        }
-		        // when to handle commitIndex majority? from leader, does follower need to worry? 
 
 		        // Reply success=True and term
 				reply->success = true;
@@ -311,20 +323,7 @@ void Node::leader_handler(message *msg) {
             fflush(output);
 			log[commitIndex+1] = *entry_ptr; // 		
 
-			count = 1; 
-
-			/*
-			message *appendEntry = (message *)calloc(1, sizeof(message));
-	    	appendEntry->type = APPEND_ENTRIES;
-	    	appendEntry->message_len = msg->message_len; // here
-	    	appendEntry->term = currentTerm;
-	    	appendEntry->from = serverID;
-	    	appendEntry->message_id = msg->message_id;
-
-	    	appendEntry->prevLogIndex = commitIndex;
-	    	appendEntry->prevLogTerm = log[commitIndex].term;
-	    	appendEntry->leaderCommit = commitIndex;
-	    	*/
+			count = 1; // the number of server that get this new msg.
 
 			// send AppendEntries to all followers
 	    	for (int i = 0; i < NUM_SERVER; i++) {
@@ -364,6 +363,23 @@ void Node::leader_handler(message *msg) {
 					count++;
 					if (count > NUM_SERVER/2) {
 						commitIndex++;
+						// Send Commit Messsage to Follower (Ensure Follower will get commitIDX update of the last entry)
+
+						message *commit = (message *)calloc(1, sizeof(message));
+					    commit->type = COMMIT;
+					    commit->message_len = 0;
+					    commit->term = currentTerm;	
+					    commit->from = serverID;
+					    commit->leaderCommit = commitIndex;
+
+					    for (int i = 0; i < NUM_SERVER; i++) {
+					        if (i != serverID){
+					        	commit->prevLogIndex = nextIndex[i]-1;
+					            sendMsg(peer_socket, commit, BASE_PORT + i % NUM_SERVER);
+					        }
+					    }
+
+						// ACK to client
 						sendACKtoProxy(log[commitIndex].message_id, commitIndex);
 					}
 				}

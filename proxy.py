@@ -40,7 +40,7 @@ class ClientHandler(Thread):
             if "\n" in self.buffer:
                 (l, rest) = self.buffer.split("\n", 1)
                 self.buffer = rest
-                s = l.split()
+                print l
                 if len(s) < 2:
                     continue
                 if s[0] == 'ack':
@@ -53,6 +53,7 @@ class ClientHandler(Thread):
                         wait_for_ack = False
                     ack_lock.release()
                 elif s[0] == 'chatLog':
+                    print "chatLog request return"
                     chatLog = s[1]
                     print chatLog
                     wait_chat_log = False
@@ -108,7 +109,7 @@ def exit(exit=False):
     sys.exit(0)
 
 def timeout():
-    time.sleep(120)
+    time.sleep(1000)
     exit(True)
 
 def main():
