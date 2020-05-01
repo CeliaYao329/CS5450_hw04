@@ -40,7 +40,7 @@ class ClientHandler(Thread):
             if "\n" in self.buffer:
                 (l, rest) = self.buffer.split("\n", 1)
                 self.buffer = rest
-                print l
+                s = l.split()
                 if len(s) < 2:
                     continue
                 if s[0] == 'ack':
