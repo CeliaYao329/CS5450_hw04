@@ -21,11 +21,11 @@ for f in os.listdir(tests):
     if isfile(abs_f):
         if f[len(f) - len('.input'):] == '.input':
             fn = f[:len(f) - len('.input')]
-            print fn,
-            os.system('./master.py < ' + abs_f + \
+            print fn
+            os.system('./proxy.py < ' + abs_f + \
                     ' 2> ' + join(test_output, fn+'.err') +\
                     ' > ' + join(test_output, fn+'.output'))
-
+            
             os.system('./stopall >/dev/null 2>/dev/null')
 
             with open(join(test_output, fn+'.output')) as fi:
@@ -35,6 +35,7 @@ for f in os.listdir(tests):
             result = True
             out_index = 0
             for s in std:
+                print s
                 json = eval(s)
                 prev = None
                 for i in range(json['count']):

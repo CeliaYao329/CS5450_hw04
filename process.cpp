@@ -35,16 +35,19 @@ public:
 
     //Volatile state
     uint16_t commitIndex = 0; // index of highest log entry known to be committed (initialized to 0, increases monotonically)
-    uint16_t lastApplied; // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+    //uint16_t lastApplied; // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
 
     //Volatile state for leader
     std::vector<uint16_t> nextIndex; // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-    std::vector<uint16_t> matchIndex; // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+    //std::vector<uint16_t> matchIndex; // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
     //Volatile state for candidate;
     int vote;
 
-    int count;
+    int count; // count the number of received nodes that received current message in this network
+    bool msg_commit = true; // if new message is commited
+    bool leader_processing = false; // if leader is busy processing a message now
+    message* new_msg; // store the new client message
 
     Node(uint16_t _serverID, int _proxyPort);
     void runElection();
@@ -54,6 +57,7 @@ public:
     void leader_handler(message *msg);
     void sendACKtoProxy(int message_id, int sequence_id);
     message *appendEntries(int next_idx);
+    void alarm_handler(int sig);
 
 
     int sendMsg(int socket, message *m, int peerPort) {
@@ -73,6 +77,12 @@ public:
     }
 };
 
+Node node(0, 0); // for the use of signal handler, ugly though
+
+void alarm_handler_wrapper(int sig) {
+	node.alarm_handler(sig);
+}
+
 Node::Node(uint16_t _serverID, int _proxyPort) : serverID(_serverID), proxyPort(_proxyPort) {
     printf("%d server node constructed\n", serverID);
     peerPort = BASE_PORT + serverID;
@@ -81,6 +91,36 @@ Node::Node(uint16_t _serverID, int _proxyPort) : serverID(_serverID), proxyPort(
     entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
 	entry_ptr->term = 0;
 	log[0] = *entry_ptr;
+}
+
+void Node::alarm_handler(int sig) {
+	signal(SIGALRM, SIG_IGN);
+	char *time_str = timestamp();
+    printf("%s - Activity Resend Timeout - \n", time_str);
+	switch (status) {
+    case FOLLOWER: {
+        if (msg_commit == false) {
+        	// resend new message to leader
+        	char *time_str = timestamp();
+            printf("%s - Follower Timeout - Resend New message to Leader\n", time_str);
+        	new_msg->term = currentTerm;
+        	sendMsg(peer_socket, new_msg, BASE_PORT + curLeader % NUM_SERVER);
+        }
+        break;
+    }
+    case LEADER: {
+        if (msg_commit == false) {
+        	char *time_str = timestamp();
+            printf("%s - Leader Timeout - Resend New message to Leader\n", time_str);
+        	new_msg->term = currentTerm;
+        	sendMsg(peer_socket, new_msg, BASE_PORT + curLeader % NUM_SERVER);
+        }
+        break;
+    }
+    }
+
+    signal(SIGALRM, alarm_handler_wrapper);
+    alarm(6);
 }
 
 void Node::sendACKtoProxy(int message_id, int sequence_id) {
@@ -161,6 +201,7 @@ void Node::sendHeartbeats() {
     heartBeat->message_len = 0;
     heartBeat->term = currentTerm;
     heartBeat->from = serverID;
+    heartBeat->leaderCommit = commitIndex;
     for (int i = 0; i < NUM_SERVER; i++) {
         if (i != serverID)
             sendMsg(peer_socket, heartBeat, BASE_PORT + i % NUM_SERVER);
@@ -177,6 +218,7 @@ void Node::follower_handler(message *msg) {
 				printf("Follower %d Update its commitIndex to %d\n", serverID, msg->leaderCommit);
             	fflush(output);
 				commitIndex = msg->leaderCommit;
+				msg_commit = true;
 			}
 		}
 		break;
@@ -236,11 +278,25 @@ void Node::follower_handler(message *msg) {
 				printf("Follower %d send success reply to leader\n", serverID);
 		        fflush(output);
 		        sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		    } else {
+		    	// heartbeats
+		    	if (msg->leaderCommit > commitIndex && commitIndex == 0) {
+		    		printf("Follower %d Receive HeartBeat, CommitIndex Different, Reply False\n", serverID);
+		        	fflush(output);
+		    		message *reply = (message *)calloc(1, sizeof(message));
+		   			reply->type = APPEND_ENTRIES;
+		    		//reply->message_len = msg->message_len;
+		    		reply->term = currentTerm;
+		    		reply->from = serverID;		    		
+		        	reply->success = false;
+		        	sendMsg(peer_socket, reply, BASE_PORT + curLeader);
+		    	}
+
 		    }
         } else {
         	// if currentTerm > msg->term, reply false
         	if (msg->message_len > 0) {
-		    	printf("Follower %d Receive a Append_Entries from node %d, but currentTerm is higher, Reply False\n", serverID, msg->from);
+		    	printf("Follower %d Receive a Append_Entries from node %d, but currentTerm %d is higher than msg term %d, Reply False\n", serverID, msg->from, currentTerm, msg->term);
 		        fflush(output);
 		    	message *reply = (message *)calloc(1, sizeof(message));
 				reply->type = APPEND_ENTRIES;
@@ -294,11 +350,10 @@ void Node::candidate_handler(message *msg) {
 
             sendHeartbeats();
             time_str = timestamp();
-            printf("%s - became leader\n", time_str, vote);
+            printf("%s - became leader, %d\n", time_str, vote);
             fflush(output);
         }
     }
-        
 }
 
 void Node::leader_handler(message *msg) {
@@ -306,7 +361,7 @@ void Node::leader_handler(message *msg) {
 	if (msg->term <= currentTerm) {
         //return;
     
-		if (msg->type == FORWARD) { // what if leader receive a new message again 
+		if (msg->type == FORWARD && leader_processing == false) { // what if leader receive a new message again 
 			// log index start at 1
 			// construct new logentry
 			printf("Leader Receive a New Forward Message from node %d\n", msg->from);
@@ -324,6 +379,7 @@ void Node::leader_handler(message *msg) {
 			log[commitIndex+1] = *entry_ptr; // 		
 
 			count = 1; // the number of server that get this new msg.
+			leader_processing = true; // leader is processing a new entry now
 
 			// send AppendEntries to all followers
 	    	for (int i = 0; i < NUM_SERVER; i++) {
@@ -341,8 +397,8 @@ void Node::leader_handler(message *msg) {
 	    	}
 		}
 
-		if (msg->type == APPEND_ENTRIES && msg->message_len > 0) { // response from followers 
-			if (msg->success) { // true
+		if (msg->type == APPEND_ENTRIES) { // response from followers 
+			if (msg->success && msg->message_len > 0) { // true
 				// If successful: update nextIndex and matchIndex for follower
 				printf("Leader Receive a Success Reply of AppendEntrie from %d\n", msg->from);
             	fflush(output);
@@ -374,11 +430,13 @@ void Node::leader_handler(message *msg) {
 
 					    for (int i = 0; i < NUM_SERVER; i++) {
 					        if (i != serverID){
-					        	commit->prevLogIndex = nextIndex[i]-1;
+					        	//commit->prevLogIndex = nextIndex[i]-1;
 					            sendMsg(peer_socket, commit, BASE_PORT + i % NUM_SERVER);
 					        }
 					    }
 
+					    leader_processing = false; // leader finish commiting this new entry
+					    msg_commit = true; // the client message is commited
 						// ACK to client
 						sendACKtoProxy(log[commitIndex].message_id, commitIndex);
 					}
@@ -388,9 +446,15 @@ void Node::leader_handler(message *msg) {
 				printf("Leader Receive a False Reply of AppendEntrie from %d\n", msg->from);
             	fflush(output);
 				// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
-				nextIndex[msg->from]--; 
+				if (nextIndex[msg->from] >= 1) {
+					nextIndex[msg->from]--; 
+				}				
+				printf("nextIndex[msg->from]:  %d\n", nextIndex[msg->from]);
+            	fflush(output);
 				// send log entry AE at nextIndex back
 				message *appendEntry = appendEntries(nextIndex[msg->from]);
+				printf("Hereeeeee \n");
+            	fflush(output);
 				sendMsg(peer_socket, appendEntry, BASE_PORT + msg->from);
 			}
 		}
@@ -482,7 +546,7 @@ int main(int argc, char *argv[]) {
         exit(-1);
     }
     NUM_SERVER = atoi(argv[2]);
-    Node node(atoi(argv[1]), atoi(argv[3]));
+    node = Node(atoi(argv[1]), atoi(argv[3]));
 
     // Redirecting stdout
     char log_file[15];
@@ -492,7 +556,7 @@ int main(int argc, char *argv[]) {
     printf("Start\n");
     fflush(output);
 
-    int max_sd, activity, new_socket;
+    int max_sd, activity, new_socket, activity_resend;
     socklen_t addrlen;
     struct sockaddr_in proxyAddr;
     struct sockaddr_in peerAddr;
@@ -511,6 +575,9 @@ int main(int argc, char *argv[]) {
     node.peer_socket = createPeerSocket(node.peerPort);
     printf("Peer socket %d bind to port %d \n", node.peer_socket, BASE_PORT + node.serverID);
 
+    signal(SIGALRM, alarm_handler_wrapper);
+	alarm(6);
+
     while (TRUE) {
 
         // clear the socket set
@@ -527,7 +594,6 @@ int main(int argc, char *argv[]) {
             timeout.tv_sec = 4;
             timeout.tv_usec = rand() % 150 + 150;
         }
-
         else {
             timeout.tv_sec = 1;
             timeout.tv_usec = 500;
@@ -607,7 +673,6 @@ int main(int argc, char *argv[]) {
                     } else if (strncmp(cmd_buffer, "msg", strlen("msg")) == 0) {
                         char *text_pointer = strchr(cmd_buffer, ' ');
                         text_pointer = strchr(text_pointer + 1, ' ') + 1;
-
                         char *id_pointer = strchr(cmd_buffer, ' ') + 1;
 
                         message *fwd_msg = (message *)calloc(1, sizeof(message));
@@ -618,14 +683,13 @@ int main(int argc, char *argv[]) {
                         fwd_msg->message_id = atoi(id_pointer); // msg_id
                         memcpy(fwd_msg->msg, text_pointer, strlen(text_pointer));
 
+                        node.new_msg = fwd_msg;
+                        node.msg_commit = false;
 
-                        if (node.curLeader >= 0) {
-                            node.sendMsg(node.peer_socket, fwd_msg, BASE_PORT + node.curLeader % NUM_SERVER);
-                        } else {
-                            char msg_buf[MAX_MSG_LEN];
-                            memcpy(msg_buf, text_pointer, strlen(text_pointer));
-                            // TODO: add to buffer
-
+                        if (node.curLeader >= 0) { // leader is avalible
+                            node.sendMsg(node.peer_socket, fwd_msg, BASE_PORT + node.curLeader % NUM_SERVER);                        
+                        } else { // leader not exist, or not avaliable now
+                            
                         }
                     }
                 }
@@ -633,6 +697,8 @@ int main(int argc, char *argv[]) {
 
             // messages from peer servers
             if (FD_ISSET(node.peer_socket, &readfds)) {
+            	//printf("Messages from peer servers\n");
+                //fflush(output);
                 message *msg_buffer = (message *)calloc(1, sizeof(message));
                 int valread = recvfrom(node.peer_socket, msg_buffer, sizeof(struct message), 0, (struct sockaddr *)&peerAddr, &addrlen);
                 if (valread <= 0) {
