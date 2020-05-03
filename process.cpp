@@ -218,7 +218,9 @@ void Node::follower_handler(message *msg) {
 				printf("Follower %d Update its commitIndex to %d\n", serverID, msg->leaderCommit);
             	fflush(output);
 				commitIndex = msg->leaderCommit;
-				msg_commit = true;
+				if (msg->message_id == new_msg->message_id) { // if the newly commit message is this node's new message
+					msg_commit = true;
+				}
 			}
 		}
 		break;
@@ -238,6 +240,7 @@ void Node::follower_handler(message *msg) {
 	    		reply->message_len = msg->message_len;
 	    		reply->term = currentTerm;
 	    		reply->from = serverID;
+	    		reply->message_id = msg->message_id;
 
 		        if ((log[msg->prevLogIndex].term != msg->prevLogTerm) || (commitIndex < msg->prevLogIndex-1)) {
 		        	// reply false and term
@@ -360,11 +363,12 @@ void Node::leader_handler(message *msg) {
 
 	if (msg->term <= currentTerm) {
         //return;
-    
+    	printf("Leader Receive (message_id: %d) from node %d\n", msg->message_id, msg->from);
+        fflush(output);
 		if (msg->type == FORWARD && leader_processing == false) { // what if leader receive a new message again 
 			// log index start at 1
 			// construct new logentry
-			printf("Leader Receive a New Forward Message from node %d\n", msg->from);
+			printf("Leader Receive a New Forward Message (message_id: %d) from node %d\n", msg->from, msg->message_id);
             fflush(output);
 
 			entry *entry_ptr = (entry *)calloc(1, sizeof(entry));
@@ -427,6 +431,7 @@ void Node::leader_handler(message *msg) {
 					    commit->term = currentTerm;	
 					    commit->from = serverID;
 					    commit->leaderCommit = commitIndex;
+					    commit->message_id = msg->message_id;
 
 					    for (int i = 0; i < NUM_SERVER; i++) {
 					        if (i != serverID){
@@ -687,9 +692,11 @@ int main(int argc, char *argv[]) {
                         node.msg_commit = false;
 
                         if (node.curLeader >= 0) { // leader is avalible
+                        	printf("Follower %d sending new message_id %d to Leader\n", node.serverID, fwd_msg->message_id);
+                        	fflush(output);
                             node.sendMsg(node.peer_socket, fwd_msg, BASE_PORT + node.curLeader % NUM_SERVER);                        
                         } else { // leader not exist, or not avaliable now
-                            
+                            printf("Follower %d get a new message_id %d, but no leader now", node.serverID, fwd_msg->message_id);
                         }
                     }
                 }
