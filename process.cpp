@@ -441,7 +441,9 @@ void Node::leader_handler(message *msg) {
 					    }
 
 					    leader_processing = false; // leader finish commiting this new entry
-					    msg_commit = true; // the client message is commited
+					    if (msg->message_id == new_msg->message_id) {
+					    	msg_commit = true;
+					    }
 						// ACK to client
 						sendACKtoProxy(log[commitIndex].message_id, commitIndex);
 					}
