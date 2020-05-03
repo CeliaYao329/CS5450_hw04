@@ -212,15 +212,17 @@ void Node::follower_handler(message *msg) {
     switch (msg->type) {
 	case COMMIT:
 		if (msg->term >= currentTerm) {
-			printf("Follower %d Receive a COMMIT Message from node %d\n", serverID, msg->from);
+			printf("Follower %d Receive a COMMIT (commitIdx %d) from node %d\n", serverID, msg->leaderCommit, msg->from);
+			printf("Follower %d, current commitIndex is %d \n", serverID, commitIndex);
             fflush(output);
+            if(msg->message_id == new_msg->message_id){ // if the newly commit message is this node's new message
+            	msg_commit = true;
+            }
+
 			if (msg->leaderCommit == commitIndex+1) {
 				printf("Follower %d Update its commitIndex to %d\n", serverID, msg->leaderCommit);
             	fflush(output);
 				commitIndex = msg->leaderCommit;
-				if (msg->message_id == new_msg->message_id) { // if the newly commit message is this node's new message
-					msg_commit = true;
-				}
 			}
 		}
 		break;
@@ -392,7 +394,7 @@ void Node::leader_handler(message *msg) {
 	        		if (commitIndex+1 >= nextIndex[i]) {
 	        			// send appendEntry with log starting at nextIndex[i]  
 	        			// here sending the new message
-	        			printf("Leader send new AppendEntries to node %d\n", i);
+	        			printf("Leader send new AppendEntries at nextIndex %d to node %d\n", nextIndex[i], i);
             			fflush(output);
 						message *appendEntry = appendEntries(nextIndex[i]);
 	        			sendMsg(peer_socket, appendEntry, BASE_PORT + i % NUM_SERVER);
@@ -433,6 +435,8 @@ void Node::leader_handler(message *msg) {
 					    commit->leaderCommit = commitIndex;
 					    commit->message_id = msg->message_id;
 
+					    printf("Leader send COMMIT commitIndex %d to follower \n", commitIndex);
+            			fflush(output);
 					    for (int i = 0; i < NUM_SERVER; i++) {
 					        if (i != serverID){
 					        	//commit->prevLogIndex = nextIndex[i]-1;
@@ -453,8 +457,10 @@ void Node::leader_handler(message *msg) {
 				printf("Leader Receive a False Reply of AppendEntrie from %d\n", msg->from);
             	fflush(output);
 				// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
-				if (nextIndex[msg->from] >= 1) {
-					nextIndex[msg->from]--; 
+				if (nextIndex[msg->from] > 1) {
+					nextIndex[msg->from]--; // min is 1
+				} else {
+					nextIndex[msg->from] = 1;
 				}				
 				printf("nextIndex[msg->from]:  %d\n", nextIndex[msg->from]);
             	fflush(output);
@@ -659,7 +665,7 @@ int main(int argc, char *argv[]) {
                     	}
                     	strcat(send_buf, "\n");
                     	num_to_send +=1;
-                    	printf("ChatLog 3!\n");
+                    	printf("%s\n", send_buf);
                         fflush(output);
 
                     	int valsend = sendto(node.proxy_socket, send_buf, num_to_send, 0, (struct sockaddr *)&proxyAddr, sizeof(proxyAddr));

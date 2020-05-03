@@ -35,7 +35,6 @@ for f in os.listdir(tests):
             result = True
             out_index = 0
             for s in std:
-                print s
                 json = eval(s)
                 prev = None
                 for i in range(json['count']):
