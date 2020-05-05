@@ -168,7 +168,7 @@ message* Node::appendEntries(int next_idx) {
 	}
 
 	appendEntry->leaderCommit = commitIndex;
-	memcpy(appendEntry->msg, &log_entry.msg, strlen(log_entry.msg)); // pointer?
+	memcpy(appendEntry->msg, &log_entry.msg, strlen(log_entry.msg)); 
 
 	return appendEntry;
 }
@@ -646,7 +646,6 @@ int main(int argc, char *argv[]) {
 
                     // "<id> get chatLog"
                     if (strncmp(cmd_buffer, "get chatLog", strlen("get chatLog")) == 0) {
-                        // TODO: return chatLog
                         printf("Command: ChatLog!\n");
                         fflush(output);
 
@@ -659,7 +658,7 @@ int main(int argc, char *argv[]) {
                     	for (int i=1; i<=node.commitIndex; i++) {
                         	fflush(output);
                     		strcat(send_buf, node.log[i].msg);
-                    		send_buf[strlen(send_buf)-1] = 0; // remove newline char?
+                    		send_buf[strlen(send_buf)-1] = 0; 
                            	strcat(send_buf, ",");
                            	num_to_send += strlen(node.log[i].msg);
                     	}
